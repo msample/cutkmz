@@ -337,6 +337,7 @@ func process(v *viper.Viper, args []string) error {
 			return err
 		}
 		zipd(filepath.Join(tmpDir, base), zf)
+		zf.Close()
 
 		if !keepTmp {
 			err = os.RemoveAll(tmpDir)
