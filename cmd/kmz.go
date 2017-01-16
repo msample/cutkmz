@@ -405,7 +405,7 @@ func delta(tileWidth, tileHeight int, box [4]float64, totWidth, totHeight int) (
 	return
 }
 
-// eastDelta returns the positve decimal degrees different between the
+// eastDelta returns the positve decimal degrees difference between the
 // given east and west longitudes
 func eastDelta(e, w float64) float64 {
 	e = normEasting(e)
