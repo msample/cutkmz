@@ -21,11 +21,6 @@ import (
 )
 
 const (
-	north int = iota // index in box []float64 for its dec. degrees
-	south
-	east
-	west
-
 	convProg     = "convert"  // img mgck. "gm convert" poss
 	identifyProg = "identify" // "gm identify" ditto
 )
@@ -57,6 +52,48 @@ const kmlOverlayTmpl = `  <GroundOverlay>
 const kmlFtr = `</Document>
 </kml>
 `
+
+const (
+	north int = iota // index into [4]float64 assoc dec. degrees
+	south
+	east
+	west
+)
+
+// mapTile holds an image filepath, its lat/long bounding box and
+// pixel width & height
+type mapTile struct {
+	fpath  string     // file path of tile image
+	width  int        // Tile width in pixels
+	height int        // Tile height in pixels
+	box    [4]float64 // lat&long bounding box in decimal degrees
+}
+
+// NewMapTile populates a map tile using the given width and height
+// instead of extracting it from the given file path. Panics if North
+// < South or cross a pole.
+func NewMapTile(fpath string, pixWid, pixHigh int, n, s, e, w float64) *mapTile {
+	if n > 90 || s < -90 || n < s {
+		panic("No crossing a pole and map's North must be greater than South")
+	}
+	rv := &mapTile{
+		fpath:  fpath,
+		width:  pixWid,
+		height: pixHigh,
+		box:    [4]float64{n, s, normEasting(e), normEasting(w)},
+	}
+	return rv
+}
+
+// NewMapTileFromFile reads in given file path and creates a map tile
+// with the filepath and pix width & height from the image.
+func NewMapTileFromFile(fpath string, n, s, e, w float64) (*mapTile, error) {
+	wid, high, err := imageWxH(fpath)
+	if err != nil {
+		return nil, err
+	}
+	return NewMapTile(fpath, wid, high, n, s, e, w), nil
+}
 
 var kmzCmd = &cobra.Command{
 	Use:   "kmz",
@@ -94,7 +131,6 @@ Requires the imagemagick to be installed on your system, and uses its
 
 `,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("DIRS", north, south, east, west)
 		if err := process(viper.GetViper(), args); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			fmt.Fprintf(os.Stderr, "see 'cutkmz kmz -h' for help\n")
@@ -115,6 +151,9 @@ func init() {
 	kmzCmd.Flags().IntP("drawing_order", "d", 51, "Garmins make values > 50 visible. Tune if have overlapping overlays.")
 	viper.BindPFlag("drawing_order", kmzCmd.Flags().Lookup("drawing_order"))
 
+	kmzCmd.Flags().BoolP("keep_tmp", "k", false, "Don't delete intermediate files from $TMPDIR.")
+	viper.BindPFlag("keep_tmp", kmzCmd.Flags().Lookup("keep_tmp"))
+
 	kmzCmd.Flags().AddGoFlagSet(flag.CommandLine)
 	flag.CommandLine.VisitAll(func(f *flag.Flag) {
 		viper.BindPFlag(f.Name, kmzCmd.Flags().Lookup(f.Name))
@@ -123,8 +162,8 @@ func init() {
 }
 
 //  getBox returns map name & lat/long bounding box by extracing it
-//  from the name. The Float slice is in order: northLat, southLat,
-//  eastLong, westLong in decimal degrees
+//  from the given file name. The Float slice is in order: northLat,
+//  southLat, eastLong, westLong in decimal degrees
 func getBox(image string) (base string, box []float64, err error) {
 	c := strings.Split(image, "_")
 	if len(c) != 5 {
@@ -146,11 +185,18 @@ func getBox(image string) (base string, box []float64, err error) {
 		}
 		box = append(box, f)
 	}
+
+	if box[north] <= box[south] || box[north] > 90 || box[south] < -90 {
+		return base, box, fmt.Errorf("North boundary must be greater than south boundary and in [-90,90]")
+	}
 	return
 }
 
 // imageWxH returns the width and height of image file in pixels
 func imageWxH(imageFilename string) (width int, height int, err error) {
+	if _, err := os.Stat(imageFilename); os.IsNotExist(err) {
+		return 0, 0, err
+	}
 	cmd := exec.Command(identifyProg, "-format", "%w %h", imageFilename)
 	glog.Infof("About to run: %#v\n", cmd.Args)
 	var b []byte
@@ -166,140 +212,139 @@ func imageWxH(imageFilename string) (width int, height int, err error) {
 	if err != nil {
 		return
 	}
-	height, err = strconv.Atoi(string(wh[0]))
+	height, err = strconv.Atoi(string(wh[1]))
 	if err != nil {
 		return
 	}
 	return
 }
 
-// process the name-geo-anchored files args into KMZs
+// process the name-geo-anchored files args into KMZs. Uses
+// "max_tiles" and and "drawing_order" from viper if present.
 func process(v *viper.Viper, args []string) error {
 	maxTiles := v.GetInt("max_tiles")
 	drawingOrder := v.GetInt("drawing_order")
+	keepTmp := v.GetBool("keep_tmp")
+
+	fmt.Printf("maxTiles %v, drawingOrder: %v, keepTmp: %v\n", maxTiles, drawingOrder, keepTmp)
 
 	if len(args) == 0 {
-		glog.Error("Image file required")
-		return fmt.Errorf("must specify an imaage file")
+		return fmt.Errorf("Image file required: must provide one or more imaage file path")
 	}
 
 	for _, image := range args {
+		if _, err := os.Stat(image); os.IsNotExist(err) {
+			return err
+		}
 		absImage, err := filepath.Abs(image)
 		if err != nil {
-			glog.Errorf("Issue with an image file path: %v", err)
-			return err
+			return fmt.Errorf("Issue with an image file path: %v", err)
 		}
 		base, box, err := getBox(absImage)
 		if err != nil {
-			glog.Errorf("Error with image file name: %v", err)
-			return err
+			return fmt.Errorf("Error with image file name: %v", err)
 		}
-		width, height, err := imageWxH(absImage)
+		origMap, err := NewMapTileFromFile(absImage, box[north], box[south], box[east], box[west])
 		if err != nil {
-			glog.Errorf("Error extracting image dimensions: %v", err)
-			return err
+			return fmt.Errorf("Error extracting image dimensions: %v", err)
 		}
-
 		maxPixels := maxTiles * 1024 * 1024
 		tmpDir, err := ioutil.TempDir("", "cutkmz-")
 		if err != nil {
-			glog.Errorf("Error creating a temporary directory: %v", err)
-			return err
+			return fmt.Errorf("Error creating a temporary directory: %v", err)
 		}
 		tilesDir := filepath.Join(tmpDir, base, "tiles")
 		err = os.MkdirAll(tilesDir, 0755)
 		if err != nil {
-			glog.Errorf("Error creating making tiles tmp dir: %v", err)
-			return err
+			return fmt.Errorf("Error making tiles dir in tmp dir: %v", err)
 		}
 
-		if maxPixels < (height * width) {
-			resizeFixToJpgs(absImage, tilesDir, base, maxPixels)
+		fixedJpg := filepath.Join(tmpDir, "fixed.jpg")
+		if maxPixels < (origMap.height * origMap.width) {
+			resizeFixToJpg(fixedJpg, absImage, maxPixels)
 		} else {
-			fixToJpgs(absImage, tilesDir, base)
+			fixToJpg(fixedJpg, absImage)
 		}
 
-		/*
-			wrkFile := absImage
-			var nextWrkFile string
-			if maxPixels < (height * width) {
-				if wrkFile, err = tmpFileName(".jpg"); err != nil {
-					return err
-				}
-				if err = resizeImage(absImage, wrkFile, maxPixels); err != nil {
-					return err
-				}
-			}
-
-			if nextWrkFile, err = tmpFileName(".jpg"); err != nil {
-				return err
-			}
-			if err = fixToJpg(wrkFile, nextWrkFile); err != nil {
-				return err
-			}
-			wrkFile = nextWrkFile
-
-			width, height, err = imageWxH(absImage)
-			if err != nil {
-				glog.Errorf("Error extracting image dimensions from fixed image: %v", err)
-				return err
-			}
-			if err = chopJpg(wrkFile, tilesDir, base); err != nil {
-				return err
-			}
-		*/
-
-		var twtr *os.File
-
-		if twtr, err = os.Create(filepath.Join(tmpDir, base, "doc.kml")); err != nil {
-			return err
-		}
-		if err = startKML(twtr, base); err != nil {
+		// Need to know pixel width of map from which we
+		// chopped the tiles so we know which row a tile is
+		// in. Knowing the tile's row allows us to set its
+		// bounding box correctly.
+		fixedMap, err := NewMapTileFromFile(fixedJpg, box[north], box[south], box[east], box[west])
+		if err != nil {
 			return err
 		}
 
-		// for each jpg tile create an entry in the kml file with is bounding box
+		// chop chop chop. bork. bork bork.
+		chopToJpgs(fixedJpg, tilesDir, base)
+
+		var kdocWtr *os.File
+
+		if kdocWtr, err = os.Create(filepath.Join(tmpDir, base, "doc.kml")); err != nil {
+			return err
+		}
+		if err = startKML(kdocWtr, base); err != nil {
+			return err
+		}
+
+		// For each jpg tile create an entry in the kml file
+		// with its bounding box. Imagemagick crop+adjoin
+		// chopped & numbered the tile image files
+		// lexocographically ascending starting from top left
+		// (000) (NW) eastwards & then down to bottom right
+		// (SE). ReadDir gives sorted result.
 		var tileFiles []os.FileInfo
 		if tileFiles, err = ioutil.ReadDir(tilesDir); err != nil {
 			return err
 		}
 		var widthSum int
-		var tbox = []float64{0, 0, 0, 0}
-		tbox[north] = box[north]
-		tbox[west] = box[west]
-		for i, tf := range tileFiles {
-			var tw, th int
-			if tw, th, err = imageWxH(filepath.Join(tilesDir, tf.Name())); err != nil {
-				return err
-			}
-			nsDeltaDeg := (float64(th) / float64(height)) * (box[north] - box[south])
-			ewDeltaDeg := (float64(tw) / float64(width)) * math.Mod(box[east]-box[west], 360)
-			widthSum += tw
-			tbox[east] = tbox[west] - ewDeltaDeg
-			tbox[south] = tbox[north] - nsDeltaDeg
-			// tile file relative path to doc.kml
-			tileFileOnly := base + fmt.Sprintf("_%03d", i)
-			tFile := filepath.Join("tiles", tileFileOnly)
-			if err = KMLAddOverlay(twtr, tileFileOnly, tbox, drawingOrder, tFile); err != nil {
-				return err
-			}
+		currNorth := fixedMap.box[north]
+		currWest := fixedMap.box[west]
+		for _, tf := range tileFiles {
 
-			if widthSum >= width {
+			tile, err := NewMapTileFromFile(filepath.Join(tilesDir, tf.Name()), currNorth, 0, 0, currWest)
+			if err != nil {
+				return err
+			}
+			// righmost tiles might be narrower, bottom
+			// ones shorter so must re-compute S & E edge
+			// for each tile; cannot assume all same
+			// size. Also double checks assumption that
+			// chopping preserves number of pixels
+			finishTileBox(tile, fixedMap)
+
+			var relTPath string // file ref inside KML must be relative to kmz root
+			if relTPath, err = filepath.Rel(filepath.Join(tmpDir, base), tile.fpath); err != nil {
+				return err
+			}
+			if err = KMLAddOverlay(kdocWtr, tf.Name(), tile.box, drawingOrder, relTPath); err != nil {
+				return err
+			}
+			widthSum += tile.width
+			if widthSum >= fixedMap.width {
 				// drop down a row
-				tbox[north] = tbox[south]
-				tbox[west] = box[west]
+				currNorth = tile.box[south]
+				currWest = fixedMap.box[west]
 				widthSum = 0
 			} else {
-				tbox[west] = tbox[east]
+				currWest = tile.box[east]
 			}
 		}
-		endKML(twtr)
-		twtr.Close()
+		endKML(kdocWtr)
+		kdocWtr.Close()
 		var zf *os.File
 		if zf, err = os.Create(base + ".kmz"); err != nil {
 			return err
 		}
 		zipd(filepath.Join(tmpDir, base), zf)
+
+		if !keepTmp {
+			err = os.RemoveAll(tmpDir)
+			if err != nil {
+				return fmt.Errorf("Error removing tmp dir & contents: %v", err)
+			}
+		}
+
 	}
 	return nil
 }
@@ -313,7 +358,7 @@ func startKML(w io.Writer, name string) error {
 	return t.Execute(w, &root)
 }
 
-func KMLAddOverlay(w io.Writer, tileName string, tbox []float64, drawingOrder int, relTileFile string) error {
+func KMLAddOverlay(w io.Writer, tileName string, tbox [4]float64, drawingOrder int, relTileFile string) error {
 	t, err := template.New("kmloverlay").Parse(kmlOverlayTmpl)
 	if err != nil {
 		return err
@@ -338,10 +383,53 @@ func endKML(w io.Writer) error {
 	return t.Execute(w, nil)
 }
 
-func resizeFixToJpgs(inFile, outDir, baseName string, maxPixArea int) error {
-	outFile := filepath.Join(outDir, baseName+"_tile_%03d.jpg")
+// finishTileBox completes the tile.box by setting its east and south
+// boundaries relative to its current north and west values using the
+// tile pixel size reltative to the full map size.
+func finishTileBox(tile, fullMap *mapTile) {
+	nsDeltaDeg, ewDeltaDeg := delta(tile.width, tile.height, fullMap.box, fullMap.width, fullMap.height)
+	tile.box[south] = tile.box[north] - nsDeltaDeg
+	tile.box[east] = tile.box[west] + ewDeltaDeg
+}
+
+// delta returns the how many degrees further South the bottom of the
+// tile is than the top, and how many degrees further east the east
+// edge of the tile is than the west, given the tile width & height in
+// pixels, the map's bounding box in decimal degrees, and the map's
+// total width and height in pixels
+func delta(tileWidth, tileHeight int, box [4]float64, totWidth, totHeight int) (nsDeltaDeg float64, ewDeltaDeg float64) {
+	nsDeltaDeg = (float64(tileHeight) / float64(totHeight)) * (box[north] - box[south])
+	ewDeg := eastDelta(box[east], box[west])
+	ewDeltaDeg = (float64(tileWidth) / float64(totWidth)) * ewDeg
+	return
+}
+
+// eastDelta returns the positve decimal degrees different between the
+// given east and west longitudes
+func eastDelta(e, w float64) float64 {
+	e = normEasting(e)
+	w = normEasting(w)
+	if e < w {
+		return 360 + e - w
+	}
+	return e - w
+}
+
+// normEasting returns the given longitude in dec degress normalized to be within [-180,180]
+func normEasting(deg float64) float64 {
+	// go's Mod fcn preserves sign on first param
+	if deg < -180 {
+		return math.Mod(deg+180, 360) + 180
+	}
+	if deg > 180 {
+		return math.Mod(deg-180, 360) - 180
+	}
+	return deg
+}
+
+func resizeFixToJpg(outFile, inFile string, maxPixArea int) error {
 	// param order super sensitive
-	cmd := exec.Command("convert", "-resize", "@"+fmt.Sprintf("%v", maxPixArea), "-crop", "1024x1024", inFile, "-strip", "-interlace", "none", "+adjoin", outFile)
+	cmd := exec.Command("convert", "-resize", "@"+fmt.Sprintf("%v", maxPixArea), inFile, "-strip", "-interlace", "none", outFile)
 	glog.Infof("About to run: %#v\n", cmd.Args)
 	_, err := cmd.Output()
 	if err != nil {
@@ -350,9 +438,19 @@ func resizeFixToJpgs(inFile, outDir, baseName string, maxPixArea int) error {
 	return nil
 }
 
-func fixToJpgs(inFile, outDir, baseName string) error {
+func fixToJpg(outFile, inFile string) error {
+	cmd := exec.Command("convert", inFile, "-strip", "-interlace", "none", outFile)
+	glog.Infof("About to run: %#v\n", cmd.Args)
+	_, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func chopToJpgs(fixedJpg, outDir, baseName string) error {
 	outFile := filepath.Join(outDir, baseName+"_tile_%03d.jpg")
-	cmd := exec.Command("convert", "-crop", "1024x1024", inFile, "-strip", "-interlace", "none", "+adjoin", outFile)
+	cmd := exec.Command("convert", "-crop", "1024x1024", fixedJpg, "+adjoin", outFile)
 	glog.Infof("About to run: %#v\n", cmd.Args)
 	_, err := cmd.Output()
 	if err != nil {
@@ -400,69 +498,3 @@ func zipd(dir string, w io.Writer) error {
 
 	return nil
 }
-
-/*
-func tmpFile(suffix string) (*os.File, error) {
-	f, err := ioutil.TempFile("", "cutkmz-")
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	newName := f.Name() + suffix
-	err = os.Rename(f.Name(), newName)
-	if err != nil {
-		return nil, err
-	}
-	return os.OpenFile(newName, os.O_RDWR, 0)
-}
-
-func tmpFileName(suffix string) (string, error) {
-	f, err := tmpFile(suffix)
-	if err != nil {
-		return "", err
-	}
-	name := f.Name()
-	f.Close()
-	return name, nil
-}
-
-// resizeImage converts inFile image to one that has a maximum pixel
-// area (width x height) of maxPixArea. Result is written to
-// outfile. Suffix on outFile name is used to deterime raster format
-// of the result (.jpg, .tiff, etc)
-func resizeImage(inFile, outFile string, maxPixArea int) error {
-	cmd := exec.Command(convProg, inFile, "-resize", "@"+strconv.Itoa(maxPixArea), outFile)
-	fmt.Printf("About to run: %v\n", cmd)
-	_, err := cmd.Output()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// fixToJpg strips unnecessary extra information (profiles, comments)
-// from the source raster image (.jpg, .tiff, etc) and produces a
-// non-interlaced .jpg as the result
-func fixToJpg(inFile, outFile string) error {
-	cmd := exec.Command(convProg, inFile, "-strip", "-interlace", "none", outFile)
-	fmt.Printf("About to run: %v\n", cmd)
-	_, err := cmd.Output()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// chopJpg chops inFile jpg into itty bitty tiles of 1024x1024 and
-// writes them into given directory. Parts are named baseName_tile_%03d.jpg"
-// FIXME: document which parts are less than 1024x1024 right edge and bottom?
-func chopJpg(inFile, outDir, baseName string) error {
-	cmd := exec.Command(convProg, "-crop", "1024x1024", inFile, "+adjoin", filepath.Join(outDir, baseName+"_tile_%03d.jpg"))
-	fmt.Printf("About to run: %v\n", cmd)
-	_, err := cmd.Output()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-*/
