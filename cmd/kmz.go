@@ -1,3 +1,6 @@
+// cutkmz subcommands
+//
+// Other than root.go, each of these go files is a  cutkmz subcommand implementation
 package cmd
 
 import (
@@ -72,7 +75,7 @@ type mapTile struct {
 // NewMapTile populates a map tile using the given width and height
 // instead of extracting it from the given file path. Panics if North
 // < South or cross a pole.
-func NewMapTile(fpath string, pixWid, pixHigh int, n, s, e, w float64) *mapTile {
+func newMapTile(fpath string, pixWid, pixHigh int, n, s, e, w float64) *mapTile {
 	if n > 90 || s < -90 || n < s {
 		panic("No crossing a pole and map's North must be greater than South")
 	}
@@ -87,12 +90,12 @@ func NewMapTile(fpath string, pixWid, pixHigh int, n, s, e, w float64) *mapTile 
 
 // NewMapTileFromFile reads in given file path and creates a map tile
 // with the filepath and pix width & height from the image.
-func NewMapTileFromFile(fpath string, n, s, e, w float64) (*mapTile, error) {
+func newMapTileFromFile(fpath string, n, s, e, w float64) (*mapTile, error) {
 	wid, high, err := imageWxH(fpath)
 	if err != nil {
 		return nil, err
 	}
-	return NewMapTile(fpath, wid, high, n, s, e, w), nil
+	return newMapTile(fpath, wid, high, n, s, e, w), nil
 }
 
 var kmzCmd = &cobra.Command{
@@ -244,7 +247,7 @@ func process(v *viper.Viper, args []string) error {
 		if err != nil {
 			return fmt.Errorf("Error with image file name: %v", err)
 		}
-		origMap, err := NewMapTileFromFile(absImage, box[north], box[south], box[east], box[west])
+		origMap, err := newMapTileFromFile(absImage, box[north], box[south], box[east], box[west])
 		if err != nil {
 			return fmt.Errorf("Error extracting image dimensions: %v", err)
 		}
@@ -270,7 +273,7 @@ func process(v *viper.Viper, args []string) error {
 		// chopped the tiles so we know which row a tile is
 		// in. Knowing the tile's row allows us to set its
 		// bounding box correctly.
-		fixedMap, err := NewMapTileFromFile(fixedJpg, box[north], box[south], box[east], box[west])
+		fixedMap, err := newMapTileFromFile(fixedJpg, box[north], box[south], box[east], box[west])
 		if err != nil {
 			return err
 		}
@@ -302,7 +305,7 @@ func process(v *viper.Viper, args []string) error {
 		currWest := fixedMap.box[west]
 		for _, tf := range tileFiles {
 
-			tile, err := NewMapTileFromFile(filepath.Join(tilesDir, tf.Name()), currNorth, 0, 0, currWest)
+			tile, err := newMapTileFromFile(filepath.Join(tilesDir, tf.Name()), currNorth, 0, 0, currWest)
 			if err != nil {
 				return err
 			}
@@ -317,7 +320,7 @@ func process(v *viper.Viper, args []string) error {
 			if relTPath, err = filepath.Rel(filepath.Join(tmpDir, base), tile.fpath); err != nil {
 				return err
 			}
-			if err = KMLAddOverlay(kdocWtr, tf.Name(), tile.box, drawingOrder, relTPath); err != nil {
+			if err = kmlAddOverlay(kdocWtr, tf.Name(), tile.box, drawingOrder, relTPath); err != nil {
 				return err
 			}
 			widthSum += tile.width
@@ -359,7 +362,7 @@ func startKML(w io.Writer, name string) error {
 	return t.Execute(w, &root)
 }
 
-func KMLAddOverlay(w io.Writer, tileName string, tbox [4]float64, drawingOrder int, relTileFile string) error {
+func kmlAddOverlay(w io.Writer, tileName string, tbox [4]float64, drawingOrder int, relTileFile string) error {
 	t, err := template.New("kmloverlay").Parse(kmlOverlayTmpl)
 	if err != nil {
 		return err
