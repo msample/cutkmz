@@ -1,6 +1,9 @@
 // cutkmz subcommands
 //
 // Other than root.go, each of these go files is a  cutkmz subcommand implementation
+//
+//   - kmz -    produces a KMZ with input JPG chopped into 1024x1024 tiles
+//   - bigkmz - produces a KMZ containing input JPG as is for higher resolution uses such as Google Earth
 package cmd
 
 import (

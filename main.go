@@ -19,7 +19,9 @@
 // THE SOFTWARE.
 
 // cutkmz - Command line Go App that converts JPG geographic map
-// images into overlay KMZs that some Garmin GPS devices can handle
+// images into overlay KMZs. The kmz subscommand produces a KMZ some
+// Garmin GPS devices can handle.  The bigkmz subcommand produces
+// higher resolution KMZs suitable for use with Google Earth etc.
 //
 // This software requires ImageMagick to be installed on your system.
 //
