@@ -124,7 +124,7 @@ func processBig(v *viper.Viper, args []string) error {
 		}
 
 		fixedJpg := filepath.Join(tilesDir, base+"_tile_000.jpg") // one tile
-		if maxPixels < (origMap.height * origMap.width) {
+		if maxPixels > 0 && maxPixels < (origMap.height*origMap.width) {
 			resizeFixToJpg(fixedJpg, absImage, maxPixels)
 		} else {
 			// just copy the file, no de-interlace or stripping
